@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini Dizionario Italiano</title>
+  <style>
+    :root{--max:860px}
+    html,body{
+      margin:0;padding:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;
+      background:#0b1020;color:#eef2ff;
+      font-size:20px; line-height:1.7;
+    }
+    .wrap{max-width:var(--max);margin:0 auto;padding:30px}
+    h1{font-size:clamp(32px,3.8vw,42px);margin:0 0 16px 0;letter-spacing:.2px}
+    p.sub{opacity:.85;margin:0 0 25px;font-size:20px}
+    .card{background:#0f1733;border:1px solid #202a55;border-radius:20px;box-shadow:0 10px 25px rgba(0,0,0,.25);padding:26px}
+    form{display:flex;gap:14px;flex-wrap:wrap}
+    input[type="text"]{
+      flex:1;min-width:230px;border:1px solid #33407a;background:#0a1230;color:#eef2ff;
+      border-radius:14px;padding:16px 18px;font-size:20px;outline:none
+    }
+    input[type="text"]:focus{border-color:#5b76ff;box-shadow:0 0 0 3px rgba(91,118,255,.25)}
+    button{border:0;background:#5b76ff;color:white;font-weight:700;border-radius:14px;padding:16px 20px;font-size:20px;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .results{margin-top:24px}
+    .pos{display:inline-block;background:#1a2452;border:1px solid #2a3a80;border-radius:999px;padding:8px 14px;font-size:16px;margin-right:8px}
+    .sense{margin:16px 0 22px 0;padding-left:2px;font-size:20px}
+    .sense ol{margin:8px 0 0 30px}
+    .muted{opacity:.78;font-size:18px}
+    .error{background:#311018;border:1px solid #6b1e2c;color:#ffd7de;border-radius:12px;padding:16px;font-size:20px}
+    footer{margin-top:32px;opacity:.75;font-size:17px}
+    a{color:#a9b7ff}
+    .spinner{width:22px;height:22px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;display:inline-block;animation:spin 1s linear infinite;vertical-align:-4px;margin-right:8px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Mini Dizionario Italiano</h1>
+    <p class="sub">Inserisci una parola in italiano e ottieni le definizioni da <strong>Wikizionario</strong>.</p>
+    <div class="card">
+      <form id="form" autocomplete="off">
+        <input id="term" type="text" placeholder="Es. cane, SINERGIA, Correre…" aria-label="Parola italiana" />
+        <button id="go" type="submit">Cerca</button>
+      </form>
+      <div id="status" class="muted" style="margin-top:10px"></div>
+      <div id="results" class="results"></div>
+    </div>
+    <footer>
+      Fonte: <a href="https://it.wiktionary.org/" target="_blank" rel="noopener">Wikizionario</a>. Questo progetto usa le API pubbliche di MediaWiki, lato client.
+    </footer>
+  </div>
+
+  <script>
+    const form = document.getElementById('form');
+    const termInput = document.getElementById('term');
+    const goBtn = document.getElementById('go');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+
+    const API = "https://it.wiktionary.org/w/api.php?origin=*";
+    const urlParse = (params) => API + "&action=parse&format=json&formatversion=2&redirects=1&" + new URLSearchParams(params).toString();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const raw = termInput.value.trim();
+      if(!raw) return;
+      resultsEl.innerHTML = '';
+      setStatus(`<span class="spinner"></span> Cerco definizioni per “${escapeHtml(raw)}”…`);
+      goBtn.disabled = true;
+      try{
+        // prova minuscolo, poi con iniziale maiuscola
+        let defs = await fetchDefinitions(raw.toLowerCase());
+        if((!defs || defs.length===0) && raw[0]){
+          const cap = raw[0].toUpperCase() + raw.slice(1).toLowerCase();
+          defs = await fetchDefinitions(cap);
+        }
+        if(!defs || defs.length === 0){
+          resultsEl.innerHTML = `<div class="error">Non ho trovato definizioni in italiano per “<strong>${escapeHtml(raw)}</strong>”.</div>`;
+        } else {
+          render(defs, raw);
+          setStatus(`${defs.length} parte/i del discorso trovata/e.`);
+        }
+      }catch(err){
+        resultsEl.innerHTML = `<div class="error">Errore: ${escapeHtml(err.message || err)}</div>`;
+      }finally{
+        goBtn.disabled = false;
+      }
+    });
+
+    async function fetchDefinitions(page){
+      const r = await fetch(urlParse({page, prop:"wikitext"}));
+      if(!r.ok) return [];
+      const data = await r.json();
+      const text = data?.parse?.wikitext || "";
+      if(!text) return [];
+      const it = sliceItalianSection(text);
+      if(!it) return [];
+      return extractPOSDefinitions(it);
+    }
+
+    function sliceItalianSection(wikitext){
+      const langRe = /^==\s*(?:Italiano|\{\{-?it-?\}\})\s*==\s*$/m;
+      const m = langRe.exec(wikitext);
+      if(!m) return null;
+      const start = m.index + m[0].length;
+      const nextLangRe = /^==\s*[^=][^=]*==\s*$/mg;
+      nextLangRe.lastIndex = start;
+      let end = wikitext.length;
+      const n = nextLangRe.exec(wikitext);
+      if(n) end = n.index;
+      return wikitext.slice(start, end);
+    }
+
+    function extractPOSDefinitions(section){
+      const parts = [];
+      const re = /(===\s*([^=].*?)\s*===)([\s\S]*?)(?=(===\s*[^=].*?\s*===)|$)/g;
+      let m;
+      while((m = re.exec(section))){
+        const title = cleanMarkup(m[2]||'').trim() || 'Definizioni';
+        const body = m[3]||'';
+        const senses = extractHashLines(body);
+        if(senses.length) parts.push({pos:title, senses});
+      }
+      if(parts.length===0){
+        const senses = extractHashLines(section);
+        if(senses.length) parts.push({pos:'Definizioni', senses});
+      }
+      return parts;
+    }
+
+    function extractHashLines(text){
+      const lines = text.split(/\n/);
+      const defs=[];
+      for(let i=0;i<lines.length;i++){
+        const l=lines[i];
+        if(/^#\s+/.test(l)&&!/^##/.test(l)){
+          let def=cleanMarkup(l.replace(/^#\s+/,""));
+          const examples=[];let j=i+1;
+          while(j<lines.length&&/^(?::|#\*)/.test(lines[j])){
+            const ex=cleanMarkup(lines[j].replace(/^(?::|#\*)\s*/,""));
+            if(ex) examples.push(ex); j++;
+          }
+          defs.push({def,examples});
+        }
+      }
+      return defs;
+    }
+
+    function cleanMarkup(s){
+      return s.replace(/\{\{[^{}]*\}\}/g,"")
+              .replace(/\[\[(?:File|Immagine):[^\]]*\]\]/gi,"")
+              .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g,"$2")
+              .replace(/\[\[([^\]]+)\]\]/g,"$1")
+              .replace(/'''?/g,"")
+              .replace(/<!--.*?-->/g,"")
+              .replace(/<[^>]+>/g,"")
+              .replace(/\s+/g," ")
+              .trim();
+    }
+
+    function render(parts, term){
+      const frag=document.createDocumentFragment();
+      const title=document.createElement('div');
+      title.className='muted';
+      title.innerHTML=`Risultati per <strong>${escapeHtml(term)}</strong>`;
+      frag.appendChild(title);
+      parts.forEach(({pos,senses})=>{
+        const div=document.createElement('div');
+        div.className='sense';
+        div.innerHTML=`<span class="pos">${escapeHtml(pos)}</span>`;
+        const ol=document.createElement('ol');
+        senses.forEach(s=>{
+          const li=document.createElement('li');
+          li.textContent=s.def;
+          if(s.examples.length){
+            const ul=document.createElement('ul');
+            s.examples.forEach(ex=>{
+              const li2=document.createElement('li');
+              li2.className='muted';
+              li2.textContent=ex;
+              ul.appendChild(li2);
+            });
+            li.appendChild(ul);
+          }
+          ol.appendChild(li);
+        });
+        div.appendChild(ol);
+        frag.appendChild(div);
+      });
+      resultsEl.innerHTML='';
+      resultsEl.appendChild(frag);
+    }
+
+    function setStatus(html){statusEl.innerHTML=html;}
+    function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));}
+
+  </script>
+</body>
+</html>
